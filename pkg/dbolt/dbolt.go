@@ -3,10 +3,8 @@ package dbolt
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"time"
 
-	"github.com/boltdb/bolt"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/grafana/dskit/ring"
@@ -22,13 +20,13 @@ const (
 var ErrKeyValueNotFound = errors.New("key-value not found")
 
 type DB struct {
-	boltdb     *bolt.DB
+	kv         KVStorage
 	lifecycler *ring.Lifecycler
 	ring       *ring.Ring
 	logger     log.Logger
 }
 
-func Open(path string, mode os.FileMode, options *Options, logger log.Logger, reg prometheus.Registerer) (*DB, error) {
+func Open(options *Options, kv KVStorage, logger log.Logger, reg prometheus.Registerer) (*DB, error) {
 	lifecycler, err := ring.NewLifecycler(options.Lifecycler, ring.NewNoopFlushTransferer(), RingName, RingKey, true, logger, reg)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create Lifecycler")
@@ -37,12 +35,8 @@ func Open(path string, mode os.FileMode, options *Options, logger log.Logger, re
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create Ring of dbolt")
 	}
-	boltdb, err := bolt.Open(path, mode, &options.Bolt)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to create boltDB")
-	}
 	return &DB{
-		boltdb:     boltdb,
+		kv:         kv,
 		lifecycler: lifecycler,
 		ring:       dboltRing,
 		logger:     logger,
@@ -75,14 +69,17 @@ func (db *DB) AwaitingTerminated(ctx context.Context) error {
 }
 
 func (db *DB) Close() error {
-	return db.boltdb.Close()
+	db.StopAsync()
+	db.AwaitingTerminated(context.Background())
+	return db.kv.Close()
 }
 
 func (db *DB) Get(ctx context.Context, bucketName, key []byte) ([]byte, error) {
 	token := []uint32{TokenFromBytes(bucketName, key)}
 	var versionedValues []*VersionedValue
 	selfAddr := db.lifecycler.Addr
-	err := ring.DoBatch(ctx, ring.Read, db.ring, token, func(id ring.InstanceDesc, i []int) error {
+	
+	if err := ring.DoBatch(ctx, ring.Read, db.ring, token, func(id ring.InstanceDesc, i []int) error {
 		level.Debug(db.logger).Log("instanceAddr", id.Addr)
 		if selfAddr == id.Addr {
 			value, err := db.get(bucketName, key)
@@ -97,8 +94,7 @@ func (db *DB) Get(ctx context.Context, bucketName, key []byte) ([]byte, error) {
 		return nil
 	}, func() {
 		// TODO
-	})
-	if err != nil {
+	}); err != nil {
 		return nil, errors.Wrapf(err, "failed to get value by key: key=%s", string(key))
 	}
 	if len(versionedValues) == 0 {
@@ -115,37 +111,24 @@ func (db *DB) Get(ctx context.Context, bucketName, key []byte) ([]byte, error) {
 }
 
 func (db *DB) get(bucketName, key []byte) (*VersionedValue, error) {
-	var payload []byte
-	err := db.boltdb.View(func(tx *bolt.Tx) error {
-		bucket, err := tx.CreateBucketIfNotExists(bucketName)
-		if err != nil {
-			return errors.Wrapf(err, "failed to create or get the bucket : bucketName=%s", string(bucketName))
-		}
-		payload = bucket.Get(key)
-		return nil
-	})
+	value, err := db.kv.Get(bucketName, key)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to do View transaction")
+		return nil, err
 	}
-
 	versionedValue := new(VersionedValue)
-	if err := json.Unmarshal(payload, versionedValue); err != nil {
-		return nil, errors.Wrap(err, "failed to unmarshal payload")
+	if err := json.Unmarshal(value, versionedValue); err != nil {
+		return nil, errors.Wrap(err, "failed to unmarshal the value")
 	}
 	return versionedValue, nil
 }
 
 func (db *DB) put(bucketName, key, value []byte) error {
-	return db.boltdb.Update(func(tx *bolt.Tx) error {
-		bucket, err := tx.CreateBucketIfNotExists(bucketName)
-		if err != nil {
-			return errors.Wrapf(err, "failed to create or get the bucket : bucketName=%s", string(bucketName))
-		}
-		if err := bucket.Put(key, value); err != nil {
-			return errors.Wrapf(err, "failed to put : key=%s value=%s", string(key), string(value))
-		}
-		return nil
-	})
+	versionedValue := newVersionedValueNow(value)
+	jsonValue, err := json.Marshal(versionedValue)
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal the value")
+	}
+	return db.kv.Put(bucketName, key, jsonValue)
 }
 
 func TokenFromBytes(bytesArr ...[]byte) uint32 {
@@ -162,4 +145,13 @@ type VersionedValue struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	Value     []byte
+}
+
+func newVersionedValueNow(value []byte) *VersionedValue {
+	now := time.Now()
+	return &VersionedValue{
+		CreatedAt: now,
+		UpdatedAt: now,
+		Value:     value,
+	}
 }
