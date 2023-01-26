@@ -78,13 +78,13 @@ func (db *DB) Get(ctx context.Context, bucketName, key []byte) ([]byte, error) {
 	token := []uint32{TokenFromBytes(bucketName, key)}
 	var versionedValues []*VersionedValue
 	selfAddr := db.lifecycler.Addr
-	
-	if err := ring.DoBatch(ctx, ring.Read, db.ring, token, func(id ring.InstanceDesc, i []int) error {
+
+	if err := ring.DoBatch(ctx, ring.Read, db.ring, token, func(id ring.InstanceDesc, _ []int) error {
 		level.Debug(db.logger).Log("instanceAddr", id.Addr)
 		if selfAddr == id.Addr {
 			value, err := db.get(bucketName, key)
 			if err != nil {
-				return errors.Wrap(err, "failed to get value : key="+string(key))
+				return err
 			}
 			versionedValues = append(versionedValues, value)
 
@@ -108,6 +108,29 @@ func (db *DB) Get(ctx context.Context, bucketName, key []byte) ([]byte, error) {
 		}
 	}
 	return lastUpdated.Value, nil
+}
+
+func (db *DB) Put(ctx context.Context, bucketName, key, value []byte) error {
+	token := []uint32{TokenFromBytes(bucketName, key)}
+	selfAddr := db.lifecycler.Addr
+
+	if err := ring.DoBatch(ctx, ring.WriteNoExtend, db.ring, token, func(id ring.InstanceDesc, _ []int) error {
+		level.Debug(db.logger).Log("instanceAddr", id.Addr)
+		if selfAddr == id.Addr {
+			if err := db.put(bucketName, key, value); err != nil {
+				return err
+			}
+		} else {
+			// TODO
+		}
+		return nil
+
+	}, func() {
+		// TODO
+	}); err != nil {
+		return errors.Wrap(err, "failed to put key-value : key="+string(key))
+	}
+	return nil
 }
 
 func (db *DB) get(bucketName, key []byte) (*VersionedValue, error) {
