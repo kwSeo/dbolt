@@ -20,13 +20,14 @@ const (
 var ErrKeyValueNotFound = errors.New("key-value not found")
 
 type DB struct {
-	kv         KVStorage
+	selfKV     KVStorage
+	memberKV   RemoteKVStorage
 	lifecycler *ring.Lifecycler
 	ring       *ring.Ring
 	logger     log.Logger
 }
 
-func Open(options *Options, kv KVStorage, logger log.Logger, reg prometheus.Registerer) (*DB, error) {
+func Open(options *Options, selfKV KVStorage, memberKV RemoteKVStorage, logger log.Logger, reg prometheus.Registerer) (*DB, error) {
 	lifecycler, err := ring.NewLifecycler(options.Lifecycler, ring.NewNoopFlushTransferer(), RingName, RingKey, true, logger, reg)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create Lifecycler")
@@ -36,7 +37,8 @@ func Open(options *Options, kv KVStorage, logger log.Logger, reg prometheus.Regi
 		return nil, errors.Wrap(err, "failed to create Ring of dbolt")
 	}
 	return &DB{
-		kv:         kv,
+		selfKV:     selfKV,
+		memberKV:   memberKV,
 		lifecycler: lifecycler,
 		ring:       dboltRing,
 		logger:     logger,
@@ -71,30 +73,36 @@ func (db *DB) AwaitingTerminated(ctx context.Context) error {
 func (db *DB) Close() error {
 	db.StopAsync()
 	db.AwaitingTerminated(context.Background())
-	return db.kv.Close()
+	return db.selfKV.Close()
 }
 
 func (db *DB) Get(ctx context.Context, bucketName, key []byte) ([]byte, error) {
-	token := []uint32{TokenFromBytes(bucketName, key)}
+	token := []uint32{tokenFromBytes(bucketName, key)}
 	var versionedValues []*VersionedValue
 	selfAddr := db.lifecycler.Addr
 
 	if err := ring.DoBatch(ctx, ring.Read, db.ring, token, func(id ring.InstanceDesc, _ []int) error {
 		level.Debug(db.logger).Log("instanceAddr", id.Addr)
+		var value []byte
+		var err error
 		if selfAddr == id.Addr {
-			value, err := db.get(bucketName, key)
+			value, err = db.selfKV.Get(bucketName, key)
 			if err != nil {
 				return err
 			}
-			versionedValues = append(versionedValues, value)
-
 		} else {
-			// TODO
+			value, err = db.memberKV.Get(ctx, id.Addr, bucketName, key)
+			if err != nil {
+				return err
+			}
 		}
+		versionedValue, err := unmarshalVersionedValue(value)
+		if err != nil {
+			return err
+		}
+		versionedValues = append(versionedValues, versionedValue)
 		return nil
-	}, func() {
-		// TODO
-	}); err != nil {
+	}, doNothing); err != nil {
 		return nil, errors.Wrapf(err, "failed to get value by key: key=%s", string(key))
 	}
 	if len(versionedValues) == 0 {
@@ -111,50 +119,28 @@ func (db *DB) Get(ctx context.Context, bucketName, key []byte) ([]byte, error) {
 }
 
 func (db *DB) Put(ctx context.Context, bucketName, key, value []byte) error {
-	token := []uint32{TokenFromBytes(bucketName, key)}
+	token := []uint32{tokenFromBytes(bucketName, key)}
 	selfAddr := db.lifecycler.Addr
+	versionedValue := newVersionedValueNow(value)
+	marshaledVersionedValue, err := marshalVersionedValue(versionedValue)
+	if err != nil {
+		return err
+	}
 
 	if err := ring.DoBatch(ctx, ring.WriteNoExtend, db.ring, token, func(id ring.InstanceDesc, _ []int) error {
 		level.Debug(db.logger).Log("instanceAddr", id.Addr)
 		if selfAddr == id.Addr {
-			if err := db.put(bucketName, key, value); err != nil {
-				return err
-			}
+			return db.selfKV.Put(bucketName, key, marshaledVersionedValue)
 		} else {
-			// TODO
+			return db.memberKV.Put(ctx, id.Addr, bucketName, key, marshaledVersionedValue)
 		}
-		return nil
-
-	}, func() {
-		// TODO
-	}); err != nil {
+	}, doNothing); err != nil {
 		return errors.Wrap(err, "failed to put key-value : key="+string(key))
 	}
 	return nil
 }
 
-func (db *DB) get(bucketName, key []byte) (*VersionedValue, error) {
-	value, err := db.kv.Get(bucketName, key)
-	if err != nil {
-		return nil, err
-	}
-	versionedValue := new(VersionedValue)
-	if err := json.Unmarshal(value, versionedValue); err != nil {
-		return nil, errors.Wrap(err, "failed to unmarshal the value")
-	}
-	return versionedValue, nil
-}
-
-func (db *DB) put(bucketName, key, value []byte) error {
-	versionedValue := newVersionedValueNow(value)
-	jsonValue, err := json.Marshal(versionedValue)
-	if err != nil {
-		return errors.Wrap(err, "failed to marshal the value")
-	}
-	return db.kv.Put(bucketName, key, jsonValue)
-}
-
-func TokenFromBytes(bytesArr ...[]byte) uint32 {
+func tokenFromBytes(bytesArr ...[]byte) uint32 {
 	var token uint32 = 0
 	for _, bytes := range bytesArr {
 		for _, b := range bytes {
@@ -162,6 +148,22 @@ func TokenFromBytes(bytesArr ...[]byte) uint32 {
 		}
 	}
 	return token
+}
+
+func unmarshalVersionedValue(value []byte) (*VersionedValue, error) {
+	versionedValue := new(VersionedValue)
+	if err := json.Unmarshal(value, versionedValue); err != nil {
+		return nil, errors.Wrap(err, "failed to unmarshal the value")
+	}
+	return versionedValue, nil
+}
+
+func marshalVersionedValue(versionedValue *VersionedValue) ([]byte, error) {
+	marshaled, err := json.Marshal(versionedValue)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to marshal the value")
+	}
+	return marshaled, nil
 }
 
 type VersionedValue struct {
@@ -178,3 +180,5 @@ func newVersionedValueNow(value []byte) *VersionedValue {
 		Value:     value,
 	}
 }
+
+func doNothing() {}
