@@ -1,4 +1,4 @@
-package kvstorage
+package boltstore
 
 import (
 	"os"

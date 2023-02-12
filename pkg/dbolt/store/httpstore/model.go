@@ -1,4 +1,4 @@
-package httpkv
+package httpstore
 
 type GetReq struct {
 	BucketName []byte `json:"bucketName"`

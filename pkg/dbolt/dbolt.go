@@ -8,6 +8,7 @@ import (
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/grafana/dskit/ring"
+	"github.com/kwSeo/dbolt/pkg/dbolt/store"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -20,14 +21,14 @@ const (
 var ErrKeyValueNotFound = errors.New("key-value not found")
 
 type DB struct {
-	selfKV     KVStorage
-	memberKV   RemoteKVStorage
+	selfKV     store.Store
+	memberKV   store.Provider
 	lifecycler *ring.Lifecycler
 	ring       *ring.Ring
 	logger     log.Logger
 }
 
-func Open(options *Options, selfKV KVStorage, memberKV RemoteKVStorage, logger log.Logger, reg prometheus.Registerer) (*DB, error) {
+func Open(options *Options, selfKV store.Store, memberKV store.Provider, logger log.Logger, reg prometheus.Registerer) (*DB, error) {
 	lifecycler, err := ring.NewLifecycler(options.Lifecycler, ring.NewNoopFlushTransferer(), RingName, RingKey, true, logger, reg)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create Lifecycler")
@@ -86,12 +87,16 @@ func (db *DB) Get(ctx context.Context, bucketName, key []byte) ([]byte, error) {
 		var value []byte
 		var err error
 		if selfAddr == id.Addr {
-			value, err = db.selfKV.Get(bucketName, key)
+			value, err = db.selfKV.Get(ctx, bucketName, key)
 			if err != nil {
 				return err
 			}
 		} else {
-			value, err = db.memberKV.Get(ctx, id.Addr, bucketName, key)
+			foundStore, err := db.memberKV.Find(id.Addr)
+			if err != nil {
+				return err
+			}
+			value, err = foundStore.Get(ctx, bucketName, key)
 			if err != nil {
 				return err
 			}
@@ -130,9 +135,13 @@ func (db *DB) Put(ctx context.Context, bucketName, key, value []byte) error {
 	if err := ring.DoBatch(ctx, ring.WriteNoExtend, db.ring, token, func(id ring.InstanceDesc, _ []int) error {
 		level.Debug(db.logger).Log("instanceAddr", id.Addr)
 		if selfAddr == id.Addr {
-			return db.selfKV.Put(bucketName, key, marshaledVersionedValue)
+			return db.selfKV.Put(ctx, bucketName, key, marshaledVersionedValue)
 		} else {
-			return db.memberKV.Put(ctx, id.Addr, bucketName, key, marshaledVersionedValue)
+			foundStore, err := db.memberKV.Find(id.Addr)
+			if err != nil {
+				return err
+			}
+			return foundStore.Put(ctx, bucketName, key, marshaledVersionedValue)
 		}
 	}, doNothing); err != nil {
 		return errors.Wrap(err, "failed to put key-value : key="+string(key))

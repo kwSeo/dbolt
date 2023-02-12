@@ -1,4 +1,4 @@
-package httpkv
+package httpstore
 
 import (
 	"bytes"
