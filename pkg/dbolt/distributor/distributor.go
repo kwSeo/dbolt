@@ -3,8 +3,8 @@ package distributor
 import (
 	"context"
 
-	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
+	"go.uber.org/zap"
+
 	"github.com/grafana/dskit/ring"
 	"github.com/pkg/errors"
 )
@@ -19,11 +19,11 @@ var ErrKeyValueNotFound = errors.New("key-value not found")
 type Distributor struct {
 	lifecycler *ring.Lifecycler
 	ring       *ring.Ring
-	storePool  *StorePool
-	logger     log.Logger
+	storePool  *SimpleStorePool
+	logger     *zap.Logger
 }
 
-func New(lifecycler *ring.Lifecycler, ring *ring.Ring, storePool *StorePool, logger log.Logger) *Distributor {
+func New(lifecycler *ring.Lifecycler, ring *ring.Ring, storePool *SimpleStorePool, logger *zap.Logger) *Distributor {
 	return &Distributor{
 		lifecycler: lifecycler,
 		ring:       ring,
@@ -47,7 +47,7 @@ func (d *Distributor) Get(ctx context.Context, bucketName, key []byte) ([]byte, 
 	var versionedValues []*VersionedValue
 
 	if err := ring.DoBatch(ctx, ring.Read, d.ring, token, func(id ring.InstanceDesc, _ []int) error {
-		level.Debug(d.logger).Log("instanceAddr", id.Addr)
+		d.logger.Debug("Do batch on Ring for Get.", zap.String("instanceAddr", id.Addr))
 		store := d.storePool.Get(id.Addr)
 		value, err := store.Get(ctx, bucketName, key)
 
@@ -82,34 +82,11 @@ func (d *Distributor) Put(ctx context.Context, bucketName, key, value []byte) er
 	}
 
 	if err := ring.DoBatch(ctx, ring.WriteNoExtend, d.ring, token, func(id ring.InstanceDesc, _ []int) error {
-		level.Debug(d.logger).Log("instanceAddr", id.Addr)
+		d.logger.Debug("Do batch on Ring for Put.", zap.String("instanceAddr", id.Addr))
 		store := d.storePool.Get(id.Addr)
 		return store.Put(ctx, bucketName, key, marshaledVersionedValue)
 	}, doNothing); err != nil {
 		return errors.Wrap(err, "failed to put key-value : key="+string(key))
 	}
 	return nil
-}
-
-type Store interface {
-	Get(ctx context.Context, bucket, key []byte) ([]byte, error)
-	Put(ctx context.Context, bucket, key, value []byte) error
-}
-
-type StorePool struct {
-	m map[string]Store
-}
-
-func NewStorePool() *StorePool {
-	return &StorePool{
-		m: make(map[string]Store),
-	}
-}
-
-func (sp *StorePool) Get(key string) Store {
-	return sp.m[key]
-}
-
-func (sp *StorePool) Register(key string, store Store) {
-	sp.m[key] = store
 }

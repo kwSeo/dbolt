@@ -4,29 +4,29 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"go.uber.org/zap"
 	"io"
 	"net/http"
 	"os"
 	"time"
 
 	"github.com/boltdb/bolt"
-	"github.com/go-kit/log"
 	"github.com/pkg/errors"
 )
 
 type LocalStore struct {
 	db     *bolt.DB
-	logger log.Logger
+	logger *zap.Logger
 }
 
-func NewLocalStore(db *bolt.DB, logger log.Logger) *LocalStore {
+func NewLocalStore(db *bolt.DB, logger *zap.Logger) *LocalStore {
 	return &LocalStore{
 		db:     db,
 		logger: logger,
 	}
 }
 
-func Open(path string, mode os.FileMode, options *bolt.Options, logger log.Logger) (*LocalStore, error) {
+func Open(path string, mode os.FileMode, options *bolt.Options, logger *zap.Logger) (*LocalStore, error) {
 	boltdb, err := bolt.Open(path, mode, options)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create BoltDB")
