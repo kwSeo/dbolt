@@ -2,6 +2,9 @@ package dbolt
 
 import (
 	"context"
+	"fmt"
+	"github.com/boltdb/bolt"
+	"github.com/kwSeo/dbolt/pkg/dbolt/store"
 	"time"
 
 	"github.com/go-kit/log"
@@ -19,6 +22,10 @@ type Config struct {
 	RingConfig       ring.Config
 	LifecyclerConfig ring.BasicLifecyclerConfig
 	KvConfig         kv.Config
+}
+
+type ServerConfig struct {
+	HTTPListenPort int
 }
 
 type App struct {
@@ -39,11 +46,16 @@ func NewApp(cfg Config) *App {
 			initGoKitLogger,
 			initPrometheusRegistry,
 			initKvClient,
-			initRing,
+			fx.Annotate(
+				initRing,
+				fx.As(new(ring.ReadRing)),
+			),
 			initBasicLifecycler,
 			initStorePool,
 			initDistributor,
 		),
+		fx.Invoke(func(dist *distributor.Distributor) {
+		}),
 	)
 	return &App{
 		fxApp: fxApp,
@@ -92,7 +104,7 @@ func initRing(fl fx.Lifecycle, cfg Config, kvClient kv.Client, reg prometheus.Re
 	return r, nil
 }
 
-func initBasicLifecycler(fl fx.Lifecycle, r *ring.Ring, cfg Config, logger log.Logger, reg prometheus.Registerer) (*ring.BasicLifecycler, error) {
+func initBasicLifecycler(fxLc fx.Lifecycle, r *ring.Ring, cfg Config, logger log.Logger, reg prometheus.Registerer) (*ring.BasicLifecycler, error) {
 	var delegate ring.BasicLifecyclerDelegate
 	delegate = ring.NewInstanceRegisterDelegate(ring.ACTIVE, cfg.LifecyclerConfig.NumTokens)
 	delegate = ring.NewLeaveOnStoppingDelegate(delegate, logger)
@@ -102,7 +114,7 @@ func initBasicLifecycler(fl fx.Lifecycle, r *ring.Ring, cfg Config, logger log.L
 		return nil, errors.Wrap(err, "failed to create Lifecycler")
 	}
 
-	fl.Append(fx.StartStopHook(
+	fxLc.Append(fx.StartStopHook(
 		func(ctx context.Context) error {
 			err := basicLifecycler.StartAsync(ctx)
 			if err != nil {
@@ -118,10 +130,28 @@ func initBasicLifecycler(fl fx.Lifecycle, r *ring.Ring, cfg Config, logger log.L
 	return basicLifecycler, nil
 }
 
-func initStorePool() *distributor.SimpleStorePool {
-	return distributor.NewSimpleStorePool()
+func initStorePool(fxLc fx.Lifecycle, serverConfig *ServerConfig, lc *ring.BasicLifecycler, r ring.ReadRing, boltdb *bolt.DB, logger *zap.Logger) *distributor.SimpleStorePool {
+	storePool := distributor.NewSimpleStorePool()
+	fxLc.Append(fx.StartHook(func(ctx context.Context) error {
+		replicationSet, err := r.GetAllHealthy(ring.Reporting)
+		if err != nil {
+			return errors.Wrap(err, "failed to read all healthy instances")
+		}
+		for _, addr := range replicationSet.GetAddresses() {
+			var distStore distributor.Store
+			if addr == lc.GetInstanceAddr() {
+				distStore = store.NewLocalStore(boltdb, logger)
+			} else {
+				baseUrl := fmt.Sprintf("http://%s:%d", addr, serverConfig.HTTPListenPort)
+				distStore = store.NewHTTPStoreWithDefault(baseUrl)
+			}
+			storePool.Register(addr, distStore)
+		}
+		return nil
+	}))
+	return storePool
 }
 
-func initDistributor(lc *ring.Lifecycler, r *ring.Ring, sp *distributor.SimpleStorePool, logger *zap.Logger) *distributor.Distributor {
+func initDistributor(lc *ring.BasicLifecycler, r *ring.Ring, sp *distributor.SimpleStorePool, logger *zap.Logger) *distributor.Distributor {
 	return distributor.New(lc, r, sp, logger)
 }

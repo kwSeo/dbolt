@@ -70,6 +70,10 @@ type HTTPStore struct {
 	baseUrl string
 }
 
+func NewHTTPStoreWithDefault(baseUrl string) *HTTPStore {
+	return NewHTTPStore(&HttpStoreConfig{Timeout: 3 * time.Second}, baseUrl)
+}
+
 func NewHTTPStore(cfg *HttpStoreConfig, baseUrl string) *HTTPStore {
 	client := &http.Client{
 		Timeout: cfg.Timeout,
