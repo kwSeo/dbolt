@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"github.com/boltdb/bolt"
 	"github.com/kwSeo/dbolt/pkg/dbolt/store"
+	"gopkg.in/yaml.v2"
+	"os"
 	"time"
 
 	"github.com/go-kit/log"
@@ -19,9 +21,10 @@ import (
 )
 
 type Config struct {
-	RingConfig       ring.Config
-	LifecyclerConfig ring.BasicLifecyclerConfig
-	KvConfig         kv.Config
+	ServerConfig     *ServerConfig              `yaml:"server"`
+	RingConfig       ring.Config                `yaml:"ring"`
+	LifecyclerConfig ring.BasicLifecyclerConfig `yaml:"lifecycler"`
+	KvConfig         kv.Config                  `yaml:"kv"`
 }
 
 type ServerConfig struct {
@@ -30,26 +33,21 @@ type ServerConfig struct {
 
 type App struct {
 	fxApp *fx.App
-	cfg   Config
 }
 
-func NewApp(cfg Config) *App {
+func NewApp(configPath string) *App {
 	fxApp := fx.New(
 		fx.WithLogger(func(logger *zap.Logger) fxevent.Logger {
 			return &fxevent.ZapLogger{Logger: logger}
 		}),
-		fx.Provide(func() Config {
-			return cfg
-		}),
 		fx.Provide(
 			zap.NewExample,
-			initGoKitLogger,
+			fx.Annotate(initGoKitLogger, fx.As(new(log.Logger))),
 			initPrometheusRegistry,
+			initConfigLoader(configPath),
+			initServerConfig,
 			initKvClient,
-			fx.Annotate(
-				initRing,
-				fx.As(new(ring.ReadRing)),
-			),
+			fx.Annotate(initRing, fx.As(new(ring.ReadRing))),
 			initBasicLifecycler,
 			initStorePool,
 			initDistributor,
@@ -66,7 +64,26 @@ func (a *App) Run() {
 	a.fxApp.Run()
 }
 
-func initGoKitLogger(logger *zap.Logger) log.Logger {
+func initConfigLoader(path string) func() (*Config, error) {
+	return func() (*Config, error) {
+		file, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		config := new(Config)
+		err = yaml.Unmarshal(file, config)
+		if err != nil {
+			return nil, err
+		}
+		return config, nil
+	}
+}
+
+func initServerConfig(config *Config) *ServerConfig {
+	return config.ServerConfig
+}
+
+func initGoKitLogger(logger *zap.Logger) *ZapGoKitLogger {
 	return &ZapGoKitLogger{logger: logger}
 }
 
