@@ -18,15 +18,15 @@ var ErrKeyValueNotFound = errors.New("key-value not found")
 
 type Distributor struct {
 	lifecycler *ring.BasicLifecycler
-	ring       *ring.Ring
+	readRing   ring.ReadRing
 	storePool  *SimpleStorePool
 	logger     *zap.Logger
 }
 
-func New(lifecycler *ring.BasicLifecycler, ring *ring.Ring, storePool *SimpleStorePool, logger *zap.Logger) *Distributor {
+func New(lifecycler *ring.BasicLifecycler, ring ring.ReadRing, storePool *SimpleStorePool, logger *zap.Logger) *Distributor {
 	return &Distributor{
 		lifecycler: lifecycler,
-		ring:       ring,
+		readRing:   ring,
 		storePool:  storePool,
 		logger:     logger,
 	}
@@ -46,7 +46,7 @@ func (d *Distributor) Get(ctx context.Context, bucketName, key []byte) ([]byte, 
 	token := []uint32{d.tokenFromBytes(bucketName, key)}
 	var versionedValues []*VersionedValue
 
-	if err := ring.DoBatch(ctx, ring.Read, d.ring, token, func(id ring.InstanceDesc, _ []int) error {
+	if err := ring.DoBatch(ctx, ring.Read, d.readRing, token, func(id ring.InstanceDesc, _ []int) error {
 		d.logger.Debug("Do batch on Ring for Get.", zap.String("instanceAddr", id.Addr))
 		store := d.storePool.Get(id.Addr)
 		value, err := store.Get(ctx, bucketName, key)
@@ -81,7 +81,7 @@ func (d *Distributor) Put(ctx context.Context, bucketName, key, value []byte) er
 		return err
 	}
 
-	if err := ring.DoBatch(ctx, ring.WriteNoExtend, d.ring, token, func(id ring.InstanceDesc, _ []int) error {
+	if err := ring.DoBatch(ctx, ring.WriteNoExtend, d.readRing, token, func(id ring.InstanceDesc, _ []int) error {
 		d.logger.Debug("Do batch on Ring for Put.", zap.String("instanceAddr", id.Addr))
 		store := d.storePool.Get(id.Addr)
 		return store.Put(ctx, bucketName, key, marshaledVersionedValue)

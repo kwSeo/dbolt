@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/boltdb/bolt"
 	"github.com/kwSeo/dbolt/pkg/dbolt/store"
+	"github.com/kwSeo/dbolt/pkg/util"
 	"gopkg.in/yaml.v2"
 	"os"
 	"time"
@@ -21,14 +22,42 @@ import (
 )
 
 type Config struct {
-	ServerConfig     *ServerConfig              `yaml:"server"`
-	RingConfig       ring.Config                `yaml:"ring"`
-	LifecyclerConfig ring.BasicLifecyclerConfig `yaml:"lifecycler"`
-	KvConfig         kv.Config                  `yaml:"kv"`
+	BoltConfig       BoltConfig            `yaml:"bolt"`
+	ServerConfig     ServerConfig          `yaml:"server"`
+	LifecyclerConfig ring.LifecyclerConfig `yaml:"lifecycler"`
+}
+
+func (c *Config) Validate() error {
+	return util.And(
+		c.BoltConfig.Validate,
+		c.ServerConfig.Validate,
+	)
+}
+
+type BoltConfig struct {
+	DB struct {
+		Path string `yaml:"path"`
+	} `yaml:"db"`
+}
+
+func (bc *BoltConfig) Validate() error {
+	if bc.DB.Path == "" {
+		return errors.New("bolt 'db.path' required")
+	}
+	return nil
 }
 
 type ServerConfig struct {
-	HTTPListenPort int
+	BindIP         string `yaml:"bind_ip"`
+	HTTPListenPort uint16 `yaml:"http_listen_port"`
+	GRPCListenPort uint16 `yaml:"grpc_listen_port"`
+}
+
+func (sc *ServerConfig) Validate() error {
+	if sc.BindIP == "" {
+		return errors.New("BindIP required")
+	}
+	return nil
 }
 
 type App struct {
@@ -37,22 +66,23 @@ type App struct {
 
 func NewApp(configPath string) *App {
 	fxApp := fx.New(
-		fx.WithLogger(func(logger *zap.Logger) fxevent.Logger {
-			return &fxevent.ZapLogger{Logger: logger}
-		}),
 		fx.Provide(
-			zap.NewExample,
+			zap.NewDevelopment,
 			fx.Annotate(initGoKitLogger, fx.As(new(log.Logger))),
 			initPrometheusRegistry,
 			initConfigLoader(configPath),
-			initServerConfig,
 			initKvClient,
 			fx.Annotate(initRing, fx.As(new(ring.ReadRing))),
 			initBasicLifecycler,
+			initBoltDB,
 			initStorePool,
 			initDistributor,
 		),
+		fx.WithLogger(func(logger *zap.Logger) fxevent.Logger {
+			return &fxevent.ZapLogger{Logger: logger}
+		}),
 		fx.Invoke(func(dist *distributor.Distributor) {
+			// TODO: Implement logic to start distributor.
 		}),
 	)
 	return &App{
@@ -75,12 +105,13 @@ func initConfigLoader(path string) func() (*Config, error) {
 		if err != nil {
 			return nil, err
 		}
+
+		err = config.Validate()
+		if err != nil {
+			return nil, err
+		}
 		return config, nil
 	}
-}
-
-func initServerConfig(config *Config) *ServerConfig {
-	return config.ServerConfig
 }
 
 func initGoKitLogger(logger *zap.Logger) *ZapGoKitLogger {
@@ -91,16 +122,29 @@ func initPrometheusRegistry() prometheus.Registerer {
 	return prometheus.DefaultRegisterer
 }
 
-func initKvClient(cfg Config, reg prometheus.Registerer, logger log.Logger) (kv.Client, error) {
-	kvClient, err := kv.NewClient(cfg.KvConfig, ring.GetCodec(), reg, logger)
+func initKvClient(cfg *Config, reg prometheus.Registerer, logger *zap.Logger, goKitLogger log.Logger) (kv.Client, error) {
+	logger.Info("Initializing KV Client.", zap.String("type", cfg.LifecyclerConfig.RingConfig.KVStore.Store))
+	goKitLogger = log.With(goKitLogger, "service", "dskit-kv-client")
+
+	kvClient, err := kv.NewClient(cfg.LifecyclerConfig.RingConfig.KVStore, ring.GetCodec(), reg, goKitLogger)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create KV client")
 	}
 	return kvClient, nil
 }
 
-func initRing(fl fx.Lifecycle, cfg Config, kvClient kv.Client, reg prometheus.Registerer, logger log.Logger) (*ring.Ring, error) {
-	r, err := ring.NewWithStoreClientAndStrategy(cfg.RingConfig, distributor.RingName, distributor.RingKey, kvClient, ring.NewDefaultReplicationStrategy(), reg, logger)
+func initRing(fl fx.Lifecycle, cfg *Config, kvClient kv.Client, reg prometheus.Registerer, logger log.Logger) (*ring.Ring, error) {
+	logger = log.With(logger, "service", "dskit-ring")
+
+	r, err := ring.NewWithStoreClientAndStrategy(
+		cfg.LifecyclerConfig.RingConfig,
+		distributor.RingName,
+		distributor.RingKey,
+		kvClient,
+		ring.NewDefaultReplicationStrategy(),
+		reg,
+		logger,
+	)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create Ring")
 	}
@@ -121,14 +165,34 @@ func initRing(fl fx.Lifecycle, cfg Config, kvClient kv.Client, reg prometheus.Re
 	return r, nil
 }
 
-func initBasicLifecycler(fxLc fx.Lifecycle, r *ring.Ring, cfg Config, logger log.Logger, reg prometheus.Registerer) (*ring.BasicLifecycler, error) {
+func initBasicLifecycler(fxLc fx.Lifecycle, kvClient kv.Client, cfg *Config, logger *zap.Logger, goKitLogger log.Logger, reg prometheus.Registerer) (*ring.BasicLifecycler, error) {
+	goKitLogger = log.With(goKitLogger, "service", "dskit-lifecycler")
+
+	hostname, err := os.Hostname()
+	if err != nil {
+		logger.Error("Failed to read hostname.", zap.Error(err))
+		return nil, err
+	}
+
 	var delegate ring.BasicLifecyclerDelegate
 	delegate = ring.NewInstanceRegisterDelegate(ring.ACTIVE, cfg.LifecyclerConfig.NumTokens)
-	delegate = ring.NewLeaveOnStoppingDelegate(delegate, logger)
-	delegate = ring.NewAutoForgetDelegate(1*time.Minute, delegate, logger)
-	basicLifecycler, err := ring.NewBasicLifecycler(cfg.LifecyclerConfig, "example", "key", r.KVClient, delegate, logger, reg)
+	delegate = ring.NewLeaveOnStoppingDelegate(delegate, goKitLogger)
+	delegate = ring.NewAutoForgetDelegate(1*time.Minute, delegate, goKitLogger)
+
+	basicCfg := ring.BasicLifecyclerConfig{
+		ID:                              hostname,
+		Addr:                            fmt.Sprintf("%s:%s", cfg.ServerConfig.BindIP, cfg.ServerConfig.GRPCListenPort),
+		Zone:                            cfg.LifecyclerConfig.Zone,
+		HeartbeatPeriod:                 cfg.LifecyclerConfig.HeartbeatPeriod,
+		HeartbeatTimeout:                cfg.LifecyclerConfig.HeartbeatTimeout,
+		TokensObservePeriod:             cfg.LifecyclerConfig.ObservePeriod,
+		NumTokens:                       cfg.LifecyclerConfig.NumTokens,
+		KeepInstanceInTheRingOnShutdown: !cfg.LifecyclerConfig.UnregisterOnShutdown,
+	}
+	basicLifecycler, err := ring.NewBasicLifecycler(basicCfg, distributor.RingName, distributor.RingKey, kvClient, delegate, goKitLogger, reg)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to create Lifecycler")
+		logger.Error("Failed to create BasicLifecycler.", zap.Error(err))
+		return nil, err
 	}
 
 	fxLc.Append(fx.StartStopHook(
@@ -147,28 +211,47 @@ func initBasicLifecycler(fxLc fx.Lifecycle, r *ring.Ring, cfg Config, logger log
 	return basicLifecycler, nil
 }
 
-func initStorePool(fxLc fx.Lifecycle, serverConfig *ServerConfig, lc *ring.BasicLifecycler, r ring.ReadRing, boltdb *bolt.DB, logger *zap.Logger) *distributor.SimpleStorePool {
+func initBoltDB(fxLc fx.Lifecycle, cfg *Config, logger *zap.Logger) (*bolt.DB, error) {
+	// TODO: bolt.DefaultOptions 뿐만이 아니라 다른 옵션들도 사용할 수 있도록 개설 필요.
+	db, err := bolt.Open(cfg.BoltConfig.DB.Path, os.ModePerm, bolt.DefaultOptions)
+	if err != nil {
+		logger.Error("Failed to create bolt DB.", zap.Error(err))
+		return nil, err
+	}
+	return db, nil
+}
+
+func initStorePool(fxLc fx.Lifecycle, cfg *Config, lc *ring.BasicLifecycler, r ring.ReadRing, boltdb *bolt.DB, logger *zap.Logger) *distributor.SimpleStorePool {
 	storePool := distributor.NewSimpleStorePool()
+	registerMe := func() {
+		localStore := store.NewLocalStore(boltdb, logger)
+		storePool.Register(lc.GetInstanceAddr(), localStore)
+	}
+
 	fxLc.Append(fx.StartHook(func(ctx context.Context) error {
 		replicationSet, err := r.GetAllHealthy(ring.Reporting)
-		if err != nil {
+		if errors.Is(err, ring.ErrEmptyRing) {
+			registerMe()
+			return nil
+
+		} else if err != nil {
 			return errors.Wrap(err, "failed to read all healthy instances")
 		}
+
 		for _, addr := range replicationSet.GetAddresses() {
-			var distStore distributor.Store
 			if addr == lc.GetInstanceAddr() {
-				distStore = store.NewLocalStore(boltdb, logger)
+				registerMe()
 			} else {
-				baseUrl := fmt.Sprintf("http://%s:%d", addr, serverConfig.HTTPListenPort)
-				distStore = store.NewHTTPStoreWithDefault(baseUrl)
+				baseUrl := fmt.Sprintf("http://%s:%d", addr, cfg.ServerConfig.HTTPListenPort)
+				httpStore := store.NewHTTPStoreWithDefault(baseUrl)
+				storePool.Register(addr, httpStore)
 			}
-			storePool.Register(addr, distStore)
 		}
 		return nil
 	}))
 	return storePool
 }
 
-func initDistributor(lc *ring.BasicLifecycler, r *ring.Ring, sp *distributor.SimpleStorePool, logger *zap.Logger) *distributor.Distributor {
+func initDistributor(lc *ring.BasicLifecycler, r ring.ReadRing, sp *distributor.SimpleStorePool, logger *zap.Logger) *distributor.Distributor {
 	return distributor.New(lc, r, sp, logger)
 }

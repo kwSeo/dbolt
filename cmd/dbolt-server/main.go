@@ -1,7 +1,13 @@
 package main
 
-import "github.com/kwSeo/dbolt/pkg/dbolt"
+import (
+	"flag"
+	"github.com/kwSeo/dbolt/pkg/dbolt"
+)
 
 func main() {
-	dbolt.NewApp(dbolt.Config{}).Run()
+	configPath := flag.String("config-path", "./config.yml", "Configuration file path.")
+	flag.Parse()
+
+	dbolt.NewApp(*configPath).Run()
 }
