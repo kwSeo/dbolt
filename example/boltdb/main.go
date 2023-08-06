@@ -1,4 +1,4 @@
-package example
+package main
 
 import (
 	"os"
@@ -6,7 +6,7 @@ import (
 	"github.com/go-kit/log"
 )
 
-func ExampleStartBoltdb() {
+func main() {
 	var logger = log.NewLogfmtLogger(os.Stdout)
 	if err := StartBoltdb(logger, "main.db"); err != nil {
 		panic(err)

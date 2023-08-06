@@ -133,7 +133,7 @@ func initKvClient(cfg *Config, reg prometheus.Registerer, logger *zap.Logger, go
 	return kvClient, nil
 }
 
-func initRing(fl fx.Lifecycle, cfg *Config, kvClient kv.Client, reg prometheus.Registerer, logger log.Logger) (*ring.Ring, error) {
+func initRing(fl fx.Lifecycle, lc *ring.BasicLifecycler, cfg *Config, kvClient kv.Client, reg prometheus.Registerer, logger log.Logger) (*ring.Ring, error) {
 	logger = log.With(logger, "service", "dskit-ring")
 
 	r, err := ring.NewWithStoreClientAndStrategy(
@@ -151,7 +151,11 @@ func initRing(fl fx.Lifecycle, cfg *Config, kvClient kv.Client, reg prometheus.R
 
 	fl.Append(fx.StartStopHook(
 		func(ctx context.Context) error {
-			err := r.StartAsync(ctx)
+			err := lc.AwaitRunning(ctx)
+			if err != nil {
+				return err
+			}
+			err = r.StartAsync(ctx)
 			if err != nil {
 				return err
 			}

@@ -1,4 +1,4 @@
-package example
+package main
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"github.com/go-kit/log"
 )
 
-func ExampleStartDsKit() {
+func main() {
 	var logger = log.NewLogfmtLogger(os.Stdout)
 	if err := StartDsKit(context.Background(), logger); err != nil {
 		panic(err)
