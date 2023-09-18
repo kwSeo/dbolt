@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -98,6 +99,18 @@ func main() {
 		}
 		break
 	}
+
+	timeout, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	err = ring.DoBatch(timeout, ring.Read, r, []uint32{1}, func(desc ring.InstanceDesc, k []int) error {
+		level.Info(logger).Log("msg", "Do batch on ring.", "desc", desc.String(), "key", intsToString(k))
+		return nil
+	}, func() {
+		level.Info(logger).Log("msg", "Called cleanup function of ring. Do nothing.")
+	})
+	if err != nil {
+		fatal(logger, err)
+	}
 }
 
 type Config struct {
@@ -152,4 +165,12 @@ var config = Config{
 func fatal(logger log.Logger, err error) {
 	level.Error(logger).Log("err", err)
 	os.Exit(1)
+}
+
+func intsToString(ints []int) string {
+	result := ""
+	for _, v := range ints {
+		result += strconv.Itoa(v) + " "
+	}
+	return result
 }
