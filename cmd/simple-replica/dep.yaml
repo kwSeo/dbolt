@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simple-replica
+  labels:
+    app.kubernetes.io/name: simple-replica
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: simple-replica
+  replicas: 3
+  template:
+    metadata:
+      name: simple-replica
+      labels:
+        app.kubernetes.io/name: simple-replica
+    spec:
+      containers:
+        - name: simple-replica
+          image: kwseo.io/simple-replica:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 7946
+              name: memberlist
+          readinessProbe:
+            httpGet:
+              port: http
+              path: /ready
+
