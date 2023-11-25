@@ -24,3 +24,8 @@ func (sp *SimpleStorePool) Get(key string) Store {
 func (sp *SimpleStorePool) Register(key string, store Store) {
 	sp.m[key] = store
 }
+
+func (sp *SimpleStorePool) Contains(key string) bool {
+	_, ok := sp.m[key]
+	return ok
+}

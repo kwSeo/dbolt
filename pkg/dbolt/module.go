@@ -216,7 +216,7 @@ func initBasicLifecycler(fxLc fx.Lifecycle, kvClient kv.Client, cfg *Config, log
 }
 
 func initBoltDB(fxLc fx.Lifecycle, cfg *Config, logger *zap.Logger) (*bolt.DB, error) {
-	// TODO: bolt.DefaultOptions 뿐만이 아니라 다른 옵션들도 사용할 수 있도록 개설 필요.
+	// TODO: bolt.DefaultOptions 뿐만이 아니라 다른 옵션들도 사용할 수 있도록 개선 필요.
 	db, err := bolt.Open(cfg.BoltConfig.DB.Path, os.ModePerm, bolt.DefaultOptions)
 	if err != nil {
 		logger.Error("Failed to create bolt DB.", zap.Error(err))
@@ -227,32 +227,37 @@ func initBoltDB(fxLc fx.Lifecycle, cfg *Config, logger *zap.Logger) (*bolt.DB, e
 
 func initStorePool(fxLc fx.Lifecycle, cfg *Config, lc *ring.BasicLifecycler, r ring.ReadRing, boltdb *bolt.DB, logger *zap.Logger) *distributor.SimpleStorePool {
 	storePool := distributor.NewSimpleStorePool()
-	registerMe := func() {
-		localStore := store.NewLocalStore(boltdb, logger)
-		storePool.Register(lc.GetInstanceAddr(), localStore)
-	}
 
 	fxLc.Append(fx.StartHook(func(ctx context.Context) error {
-		replicationSet, err := r.GetAllHealthy(ring.Reporting)
-		if errors.Is(err, ring.ErrEmptyRing) {
-			registerMe()
-			return nil
+		go func() {
+			for range time.Tick(5 * time.Second) {
+				logger.Debug("Syncing store pool...")
 
-		} else if err != nil {
-			return errors.Wrap(err, "failed to read all healthy instances")
-		}
+				replicationSet, err := r.GetAllHealthy(ring.Reporting)
+				if err != nil {
+					logger.Error("Failed to read all healthy instances.", zap.Error(err))
+					continue
+				}
 
-		for _, addr := range replicationSet.GetAddresses() {
-			if addr == lc.GetInstanceAddr() {
-				registerMe()
-			} else {
-				baseUrl := fmt.Sprintf("http://%s:%d", addr, cfg.ServerConfig.HTTPListenPort)
-				httpStore := store.NewHTTPStoreWithDefault(baseUrl)
-				storePool.Register(addr, httpStore)
+				myAddr := lc.GetInstanceAddr()
+				for _, addr := range replicationSet.GetAddresses() {
+					if addr == myAddr {
+						logger.Debug("Registering me.")
+						localStore := store.NewLocalStore(boltdb, logger)
+						storePool.Register(myAddr, localStore)
+
+					} else if !storePool.Contains(addr) {
+						logger.Debug("Registering store of member instance.", zap.String("addr", addr))
+						baseUrl := fmt.Sprintf("http://%s:%d", addr, cfg.ServerConfig.HTTPListenPort)
+						httpStore := store.NewHTTPStoreWithDefault(baseUrl)
+						storePool.Register(addr, httpStore)
+					}
+				}
 			}
-		}
+		}()
 		return nil
 	}))
+
 	return storePool
 }
 
