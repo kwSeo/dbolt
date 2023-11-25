@@ -181,7 +181,7 @@ func initBasicLifecycler(fxLc fx.Lifecycle, kvClient kv.Client, cfg *Config, log
 	var delegate ring.BasicLifecyclerDelegate
 	delegate = ring.NewInstanceRegisterDelegate(ring.ACTIVE, cfg.LifecyclerConfig.NumTokens)
 	delegate = ring.NewLeaveOnStoppingDelegate(delegate, goKitLogger)
-	delegate = ring.NewAutoForgetDelegate(1*time.Minute, delegate, goKitLogger)
+	delegate = ring.NewAutoForgetDelegate(5*time.Second, delegate, goKitLogger)
 
 	basicCfg := ring.BasicLifecyclerConfig{
 		ID:                              hostname,
