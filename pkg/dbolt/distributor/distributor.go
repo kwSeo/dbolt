@@ -17,18 +17,16 @@ const (
 var ErrKeyValueNotFound = errors.New("key-value not found")
 
 type Distributor struct {
-	lifecycler *ring.BasicLifecycler
-	readRing   ring.ReadRing
-	storePool  *SimpleStorePool
-	logger     *zap.Logger
+	readRing  ring.ReadRing
+	storePool *SimpleStorePool
+	logger    *zap.Logger
 }
 
-func New(lifecycler *ring.BasicLifecycler, ring ring.ReadRing, storePool *SimpleStorePool, logger *zap.Logger) *Distributor {
+func New(ring ring.ReadRing, storePool *SimpleStorePool, logger *zap.Logger) *Distributor {
 	return &Distributor{
-		lifecycler: lifecycler,
-		readRing:   ring,
-		storePool:  storePool,
-		logger:     logger,
+		readRing:  ring,
+		storePool: storePool,
+		logger:    logger,
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"github.com/boltdb/bolt"
+	"github.com/grafana/dskit/dns"
+	"github.com/grafana/dskit/kv/memberlist"
 	"github.com/kwSeo/dbolt/pkg/dbolt/store"
 	"github.com/kwSeo/dbolt/pkg/util"
 	"gopkg.in/yaml.v2"
@@ -11,7 +13,6 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
-	"github.com/grafana/dskit/kv"
 	"github.com/grafana/dskit/ring"
 	"github.com/kwSeo/dbolt/pkg/dbolt/distributor"
 	"github.com/pkg/errors"
@@ -25,6 +26,7 @@ type Config struct {
 	BoltConfig       BoltConfig            `yaml:"bolt"`
 	ServerConfig     ServerConfig          `yaml:"server"`
 	LifecyclerConfig ring.LifecyclerConfig `yaml:"lifecycler"`
+	MemberlistConfig memberlist.KVConfig   `yaml:"memberlist"`
 }
 
 func (c *Config) Validate() error {
@@ -71,9 +73,9 @@ func NewApp(configPath string) *App {
 			fx.Annotate(initGoKitLogger, fx.As(new(log.Logger))),
 			initPrometheusRegistry,
 			initConfigLoader(configPath),
-			initKvClient,
+			initMemberlistService,
 			fx.Annotate(initRing, fx.As(new(ring.ReadRing))),
-			initBasicLifecycler,
+			initLifecycler,
 			initBoltDB,
 			initStorePool,
 			initDistributor,
@@ -122,40 +124,50 @@ func initPrometheusRegistry() prometheus.Registerer {
 	return prometheus.DefaultRegisterer
 }
 
-func initKvClient(cfg *Config, reg prometheus.Registerer, logger *zap.Logger, goKitLogger log.Logger) (kv.Client, error) {
-	logger.Info("Initializing KV Client.", zap.String("type", cfg.LifecyclerConfig.RingConfig.KVStore.Store))
-	goKitLogger = log.With(goKitLogger, "service", "dskit-kv-client")
-
-	kvClient, err := kv.NewClient(cfg.LifecyclerConfig.RingConfig.KVStore, ring.GetCodec(), reg, goKitLogger)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to create KV client")
-	}
-	return kvClient, nil
+func initMemberlistService(cfg *Config, goKitLogger log.Logger, reg prometheus.Registerer) *memberlist.KVInitService {
+	memberlistConfig := cfg.MemberlistConfig
+	dnsProvider := dns.NewProvider(log.With(goKitLogger, "component", "dnsProvider"), reg, dns.GolangResolverType)
+	return memberlist.NewKVInitService(&memberlistConfig, goKitLogger, dnsProvider, reg)
 }
 
-func initRing(fl fx.Lifecycle, lc *ring.BasicLifecycler, cfg *Config, kvClient kv.Client, reg prometheus.Registerer, logger log.Logger) (*ring.Ring, error) {
+func initLifecycler(fxLc fx.Lifecycle, memberlistKVInitService *memberlist.KVInitService, cfg *Config, logger *zap.Logger, goKitLogger log.Logger, reg prometheus.Registerer) (*ring.Lifecycler, error) {
+	goKitLogger = log.With(goKitLogger, "service", "dskit-lifecycler")
+
+	cfg.LifecyclerConfig.RingConfig.KVStore.MemberlistKV = memberlistKVInitService.GetMemberlistKV
+
+	lifecycler, err := ring.NewLifecycler(cfg.LifecyclerConfig, ring.NewNoopFlushTransferer(), distributor.RingName, distributor.RingKey, false, goKitLogger, reg)
+	if err != nil {
+		logger.Error("Failed to create Lifecycler.", zap.Error(err))
+		return nil, err
+	}
+
+	fxLc.Append(fx.StartStopHook(
+		func(ctx context.Context) error {
+			err := lifecycler.StartAsync(ctx)
+			if err != nil {
+				return err
+			}
+			return lifecycler.AwaitRunning(ctx)
+		},
+		func() {
+			lifecycler.StopAsync()
+		},
+	))
+
+	return lifecycler, nil
+}
+
+func initRing(fl fx.Lifecycle, cfg *Config, reg prometheus.Registerer, logger log.Logger) (*ring.Ring, error) {
 	logger = log.With(logger, "service", "dskit-ring")
 
-	r, err := ring.NewWithStoreClientAndStrategy(
-		cfg.LifecyclerConfig.RingConfig,
-		distributor.RingName,
-		distributor.RingKey,
-		kvClient,
-		ring.NewDefaultReplicationStrategy(),
-		reg,
-		logger,
-	)
+	r, err := ring.New(cfg.LifecyclerConfig.RingConfig, distributor.RingName, distributor.RingKey, logger, reg)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create Ring")
 	}
 
 	fl.Append(fx.StartStopHook(
 		func(ctx context.Context) error {
-			err := lc.AwaitRunning(ctx)
-			if err != nil {
-				return err
-			}
-			err = r.StartAsync(ctx)
+			err := r.StartAsync(ctx)
 			if err != nil {
 				return err
 			}
@@ -169,52 +181,6 @@ func initRing(fl fx.Lifecycle, lc *ring.BasicLifecycler, cfg *Config, kvClient k
 	return r, nil
 }
 
-func initBasicLifecycler(fxLc fx.Lifecycle, kvClient kv.Client, cfg *Config, logger *zap.Logger, goKitLogger log.Logger, reg prometheus.Registerer) (*ring.BasicLifecycler, error) {
-	goKitLogger = log.With(goKitLogger, "service", "dskit-lifecycler")
-
-	hostname, err := os.Hostname()
-	if err != nil {
-		logger.Error("Failed to read hostname.", zap.Error(err))
-		return nil, err
-	}
-
-	var delegate ring.BasicLifecyclerDelegate
-	delegate = ring.NewInstanceRegisterDelegate(ring.ACTIVE, cfg.LifecyclerConfig.NumTokens)
-	delegate = ring.NewLeaveOnStoppingDelegate(delegate, goKitLogger)
-	delegate = ring.NewAutoForgetDelegate(5*time.Second, delegate, goKitLogger)
-
-	basicCfg := ring.BasicLifecyclerConfig{
-		ID:                              hostname,
-		Addr:                            fmt.Sprintf("%s:%s", cfg.ServerConfig.BindIP, cfg.ServerConfig.GRPCListenPort),
-		Zone:                            cfg.LifecyclerConfig.Zone,
-		HeartbeatPeriod:                 cfg.LifecyclerConfig.HeartbeatPeriod,
-		HeartbeatTimeout:                cfg.LifecyclerConfig.HeartbeatTimeout,
-		TokensObservePeriod:             cfg.LifecyclerConfig.ObservePeriod,
-		NumTokens:                       cfg.LifecyclerConfig.NumTokens,
-		KeepInstanceInTheRingOnShutdown: !cfg.LifecyclerConfig.UnregisterOnShutdown,
-	}
-	basicLifecycler, err := ring.NewBasicLifecycler(basicCfg, distributor.RingName, distributor.RingKey, kvClient, delegate, goKitLogger, reg)
-	if err != nil {
-		logger.Error("Failed to create BasicLifecycler.", zap.Error(err))
-		return nil, err
-	}
-
-	fxLc.Append(fx.StartStopHook(
-		func(ctx context.Context) error {
-			err := basicLifecycler.StartAsync(ctx)
-			if err != nil {
-				return err
-			}
-			return basicLifecycler.AwaitRunning(ctx)
-		},
-		func() {
-			basicLifecycler.StopAsync()
-		},
-	))
-
-	return basicLifecycler, nil
-}
-
 func initBoltDB(fxLc fx.Lifecycle, cfg *Config, logger *zap.Logger) (*bolt.DB, error) {
 	// TODO: bolt.DefaultOptions 뿐만이 아니라 다른 옵션들도 사용할 수 있도록 개선 필요.
 	db, err := bolt.Open(cfg.BoltConfig.DB.Path, os.ModePerm, bolt.DefaultOptions)
@@ -225,7 +191,7 @@ func initBoltDB(fxLc fx.Lifecycle, cfg *Config, logger *zap.Logger) (*bolt.DB, e
 	return db, nil
 }
 
-func initStorePool(fxLc fx.Lifecycle, cfg *Config, lc *ring.BasicLifecycler, r ring.ReadRing, boltdb *bolt.DB, logger *zap.Logger) *distributor.SimpleStorePool {
+func initStorePool(fxLc fx.Lifecycle, cfg *Config, lc *ring.Lifecycler, r ring.ReadRing, boltdb *bolt.DB, logger *zap.Logger) *distributor.SimpleStorePool {
 	storePool := distributor.NewSimpleStorePool()
 
 	fxLc.Append(fx.StartHook(func(ctx context.Context) error {
@@ -239,7 +205,7 @@ func initStorePool(fxLc fx.Lifecycle, cfg *Config, lc *ring.BasicLifecycler, r r
 					continue
 				}
 
-				myAddr := lc.GetInstanceAddr()
+				myAddr := lc.Addr
 				for _, addr := range replicationSet.GetAddresses() {
 					if addr == myAddr {
 						logger.Debug("Registering me.")
@@ -261,6 +227,6 @@ func initStorePool(fxLc fx.Lifecycle, cfg *Config, lc *ring.BasicLifecycler, r r
 	return storePool
 }
 
-func initDistributor(lc *ring.BasicLifecycler, r ring.ReadRing, sp *distributor.SimpleStorePool, logger *zap.Logger) *distributor.Distributor {
-	return distributor.New(lc, r, sp, logger)
+func initDistributor(r ring.ReadRing, sp *distributor.SimpleStorePool, logger *zap.Logger) *distributor.Distributor {
+	return distributor.New(r, sp, logger)
 }
