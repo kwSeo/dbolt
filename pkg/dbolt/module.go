@@ -7,7 +7,6 @@ import (
 	"github.com/grafana/dskit/dns"
 	"github.com/grafana/dskit/kv/memberlist"
 	"github.com/kwSeo/dbolt/pkg/dbolt/store"
-	"github.com/kwSeo/dbolt/pkg/util"
 	"gopkg.in/yaml.v2"
 	"os"
 	"time"
@@ -21,46 +20,6 @@ import (
 	"go.uber.org/fx/fxevent"
 	"go.uber.org/zap"
 )
-
-type Config struct {
-	BoltConfig       BoltConfig            `yaml:"bolt"`
-	ServerConfig     ServerConfig          `yaml:"server"`
-	LifecyclerConfig ring.LifecyclerConfig `yaml:"lifecycler"`
-	MemberlistConfig memberlist.KVConfig   `yaml:"memberlist"`
-}
-
-func (c *Config) Validate() error {
-	return util.And(
-		c.BoltConfig.Validate,
-		c.ServerConfig.Validate,
-	)
-}
-
-type BoltConfig struct {
-	DB struct {
-		Path string `yaml:"path"`
-	} `yaml:"db"`
-}
-
-func (bc *BoltConfig) Validate() error {
-	if bc.DB.Path == "" {
-		return errors.New("bolt 'db.path' required")
-	}
-	return nil
-}
-
-type ServerConfig struct {
-	BindIP         string `yaml:"bind_ip"`
-	HTTPListenPort uint16 `yaml:"http_listen_port"`
-	GRPCListenPort uint16 `yaml:"grpc_listen_port"`
-}
-
-func (sc *ServerConfig) Validate() error {
-	if sc.BindIP == "" {
-		return errors.New("BindIP required")
-	}
-	return nil
-}
 
 type App struct {
 	fxApp *fx.App
@@ -84,7 +43,7 @@ func NewApp(configPath string) *App {
 			return &fxevent.ZapLogger{Logger: logger}
 		}),
 		fx.Invoke(func(dist *distributor.Distributor) {
-			// TODO: Implement logic to start distributor.
+			// distributor를 트리거하기 위한 빈 함수
 		}),
 	)
 	return &App{
