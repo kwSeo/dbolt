@@ -104,45 +104,55 @@ func initLifecycler(fxLc fx.Lifecycle, memberlistKVInitService *memberlist.KVIni
 
 	fxLc.Append(fx.StartStopHook(
 		func(ctx context.Context) error {
+			logger.Info("Starting lifecycler.")
 			err := lifecycler.StartAsync(ctx)
 			if err != nil {
 				return err
 			}
+			logger.Info("Awaiting lifecycler until running.")
 			return lifecycler.AwaitRunning(ctx)
 		},
-		func() {
+		func(ctx context.Context) error {
+			logger.Info("Stopping lifecycler.")
 			lifecycler.StopAsync()
+			logger.Info("Awaiting lifecycler until terminated.")
+			return lifecycler.AwaitTerminated(ctx)
 		},
 	))
 
 	return lifecycler, nil
 }
 
-func initRing(fl fx.Lifecycle, cfg *Config, reg prometheus.Registerer, logger log.Logger) (*ring.Ring, error) {
-	logger = log.With(logger, "service", "dskit-ring")
+func initRing(fl fx.Lifecycle, cfg *Config, reg prometheus.Registerer, logger *zap.Logger, goKitLogger log.Logger) (*ring.Ring, error) {
+	goKitLogger = log.With(goKitLogger, "service", "dskit-ring")
 
-	r, err := ring.New(cfg.LifecyclerConfig.RingConfig, distributor.RingName, distributor.RingKey, logger, reg)
+	r, err := ring.New(cfg.LifecyclerConfig.RingConfig, distributor.RingName, distributor.RingKey, goKitLogger, reg)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create Ring")
 	}
 
 	fl.Append(fx.StartStopHook(
 		func(ctx context.Context) error {
+			logger.Info("Starting ring.")
 			err := r.StartAsync(ctx)
 			if err != nil {
 				return err
 			}
+			logger.Info("awaiting ring until running")
 			return r.AwaitRunning(ctx)
 		},
-		func() {
+		func(ctx context.Context) error {
+			logger.Info("Stopping ring.")
 			r.StopAsync()
+			logger.Info("awaiting ring until terminated.")
+			return r.AwaitTerminated(ctx)
 		},
 	))
 
 	return r, nil
 }
 
-func initBoltDB(fxLc fx.Lifecycle, cfg *Config, logger *zap.Logger) (*bolt.DB, error) {
+func initBoltDB(cfg *Config, logger *zap.Logger) (*bolt.DB, error) {
 	// TODO: bolt.DefaultOptions 뿐만이 아니라 다른 옵션들도 사용할 수 있도록 개선 필요.
 	db, err := bolt.Open(cfg.BoltConfig.DB.Path, os.ModePerm, bolt.DefaultOptions)
 	if err != nil {
