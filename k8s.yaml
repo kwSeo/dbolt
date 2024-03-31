@@ -70,6 +70,15 @@ spec:
     matchLabels:
       app.kubernetes.io/name: dbolt-server
       app.kubernetes.io/part-of: dbolt
+  #  volumeClaimTemplates:
+  #    - metadata:
+  #        name: dbolt-data
+  #      spec:
+  #        accessModes:
+  #          - ReadWriteOnce
+  #        resources:
+  #          requests:
+  #            storage: 128Mi
   template:
     spec:
       volumes:

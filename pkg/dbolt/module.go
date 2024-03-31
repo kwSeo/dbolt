@@ -6,6 +6,7 @@ import (
 	"github.com/boltdb/bolt"
 	"github.com/grafana/dskit/dns"
 	"github.com/grafana/dskit/kv/memberlist"
+	"github.com/kwSeo/dbolt/pkg/dbolt/httpserver"
 	"github.com/kwSeo/dbolt/pkg/dbolt/store"
 	"gopkg.in/yaml.v2"
 	"os"
@@ -38,12 +39,13 @@ func NewApp(configPath string) *App {
 			initBoltDB,
 			initStorePool,
 			initDistributor,
+			initHTTPServer,
 		),
 		fx.WithLogger(func(logger *zap.Logger) fxevent.Logger {
 			return &fxevent.ZapLogger{Logger: logger}
 		}),
-		fx.Invoke(func(dist *distributor.Distributor) {
-			// distributor를 트리거하기 위한 빈 함수
+		fx.Invoke(func(s *httpserver.Server) {
+			// 애플리케이션을 트리거하기 위한 빈 함수
 		}),
 	)
 	return &App{
@@ -188,4 +190,10 @@ func initStorePool(fxLc fx.Lifecycle, cfg *Config, lc *ring.Lifecycler, r ring.R
 
 func initDistributor(r ring.ReadRing, sp *distributor.SimpleStorePool, logger *zap.Logger) *distributor.Distributor {
 	return distributor.New(r, sp, logger)
+}
+
+func initHTTPServer(fxLc fx.Lifecycle, cfg *Config, dist *distributor.Distributor, logger *zap.Logger) *httpserver.Server {
+	server := httpserver.New(&cfg.ServerConfig, dist, logger)
+	fxLc.Append(fx.StartStopHook(server.Start, server.Stop))
+	return server
 }
