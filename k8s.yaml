@@ -1,0 +1,95 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dbolt-server
+  labels:
+    app.kubernetes.io/name: dbolt-server
+    app.kubernetes.io/part-of: dbolt
+
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: dbolt-server
+    app.kubernetes.io/part-of: dbolt
+  ports:
+    - port: 8080
+      targetPort: http
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dbolt-server
+
+data:
+  config.yaml: |
+    bolt:
+      db:
+        path: /var/dbolt/test.db
+
+    server:
+      bind_ip: 0.0.0.0
+      http_listen_port: 8080
+      grpc_listen_port: 9090
+
+    lifecycler:
+      ring:
+        kvstore:
+          store: memberlist
+        replication_factor: 3
+        heartbeat_timeout: 700ms
+        zone_awareness_enabled: false
+        excluded_zones: ''
+      num_tokens: 256
+      heartbeat_period: 1s
+      heartbeat_timeout: 700ms
+      observe_period: 1s
+      join_after: 1s
+      min_ready_duration: 2s
+      interface_names: [ eth0 ]
+      final_sleep: 2s
+      tokens_file_path: /dbolt-data/tokens
+      availability_zone: ''
+      unregister_on_shutdown: true
+      readiness_check_ring_health: false
+
+---
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: dbolt-server
+  labels:
+    app.kubernetes.io/name: dbolt-server
+    app.kubernetes.io/part-of: dbolt
+spec:
+  replicas: 3
+  serviceName: dbolt-server
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dbolt-server
+      app.kubernetes.io/part-of: dbolt
+  template:
+    spec:
+      volumes:
+        - name: dbolt-server-config
+          configMap:
+            name: dbolt-server
+        - name: dbolt-server-data
+          emptyDir: { }
+      containers:
+        - name: dbolt-server
+          image: kwseo.io/dbolt-server:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+          args:
+            - --config-path=/etc/dbolt/config.yaml
+          volumeMounts:
+            - mountPath: /etc/dbolt
+              name: dbolt-server-config
+              readOnly: true
+            - mountPath: /var/dbolt
+              name: dbolt-server-data
