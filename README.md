@@ -3,6 +3,11 @@ Distributed BoltDB
 
 Stability: `Toy Project`
 
+# References
+- https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf 
+- https://cassandra.apache.org/
+- https://github.com/grafana/dskit
+
 # Architecture
 ```mermaid
 classDiagram
